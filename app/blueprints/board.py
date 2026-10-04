@@ -3,11 +3,6 @@ from flask_login import login_required
 
 from app.extensions import db
 from app.models import Plant, Pond
-from app.services.cross_plant import (
-    batches_for_code,
-    latest_batch_cross,
-    resolve_drawn_target,
-)
 from app.services.rules import RuleError, assert_can_set_pond_status, latest_batch_for_pond
 
 bp = Blueprint("board", __name__, url_prefix="/board")
@@ -56,12 +51,14 @@ def floor_plan():
     drawer_batch_count = 0
     if selected_id:
         selected = next((c["pond"] for c in pond_cards if c["pond"].id == selected_id), None)
-        if selected is None and active_plant:
-            selected = db.session.get(Pond, selected_id)
         if selected:
-            # 抽屉近班串同号对厂；瓦片全量仍是本池
-            selected_batch = latest_batch_cross(selected)
-            drawer_batches = batches_for_code(selected)
+            # 抽屉近班只读本厂本池，不按池号跨厂串
+            selected_batch = latest_batch_for_pond(selected)
+            drawer_batches = sorted(
+                selected.batches or [],
+                key=lambda b: b.started_at or 0,
+                reverse=True,
+            )
             drawer_batch_count = len(drawer_batches)
 
     return render_template(
@@ -85,9 +82,8 @@ def pond_ops(pond_id: int):
     peak_raw = (request.form.get("peak_temp_c") or "").strip()
     notes = (request.form.get("batch_notes") or "").strip()
 
-    # 出灰与近班峰值都跟同号对厂走
-    target = resolve_drawn_target(pond) if status == Pond.STATUS_DRAWN else pond
-    batch = latest_batch_for_pond(target)
+    # 峰值与出灰只作用于被点选的本厂本池，绝不按池号改写对厂同号池
+    batch = latest_batch_for_pond(pond)
     if batch is None:
         flash("该池尚无熟化批次，无法登记峰值或出灰", "error")
         return redirect(
@@ -106,8 +102,8 @@ def pond_ops(pond_id: int):
     batch.notes = notes
 
     try:
-        assert_can_set_pond_status(target, status)
-        target.status = status
+        assert_can_set_pond_status(pond, status)
+        pond.status = status
         db.session.commit()
         flash(f"{pond.code} 已更新", "ok")
     except RuleError as exc:
